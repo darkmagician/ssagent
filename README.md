@@ -11,6 +11,12 @@ It is developed based on [shadowsocks-go](https://github.com/shadowsocks/shadows
 
 ## Usage
 
+### Install
+
+```shell
+ go get github.com/darkmagician/ssagent
+```
+
 ### Run
 
 ```shell
