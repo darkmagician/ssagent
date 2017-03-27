@@ -4,14 +4,26 @@ import (
 	"bytes"
 	"flag"
 	"fmt"
-	ss "github.com/shadowsocks/shadowsocks-go/shadowsocks"
-	"gopkg.in/xmlpath.v2"
 	"io/ioutil"
 	"log"
+	"math/rand"
 	"net/http"
 	"os"
 	"strconv"
+
+	ss "github.com/shadowsocks/shadowsocks-go/shadowsocks"
+	"gopkg.in/xmlpath.v2"
 )
+
+func shuffle(strArray [][]string) {
+	length := len(strArray)
+	for idx := 0; idx < length; idx++ {
+		swap := rand.Intn(length - idx)
+		if swap > 0 {
+			strArray[idx], strArray[idx+swap] = strArray[idx+swap], strArray[idx]
+		}
+	}
+}
 
 func parse(htmlpage []byte) [][]string {
 	path := xmlpath.MustCompile("//*[@class='portfolio-item']")
@@ -53,7 +65,7 @@ func parse(htmlpage []byte) [][]string {
 }
 
 func getSSConfig(ssconfig *ss.Config) {
-	//os.Setenv("HTTP_PROXY", "http://proxy.houston.hpecorp.net:8080")
+	//os.Setenv("HTTP_PROXY", "http://proxy.atlanta.hp.com:8080")
 	res, err := http.Get("http://fast.ishadow.online/")
 	if err != nil {
 		log.Fatal(err)
@@ -65,6 +77,7 @@ func getSSConfig(ssconfig *ss.Config) {
 	}
 	//fmt.Printf("%s", robots)
 	config := parse(robots)
+	shuffle(config)
 	log.Printf("%v", config)
 	ssconfig.ServerPassword = config
 }
