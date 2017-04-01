@@ -13,6 +13,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	ss "github.com/shadowsocks/shadowsocks-go/shadowsocks"
@@ -160,6 +161,7 @@ type ServerCipher struct {
 var servers struct {
 	srvCipher []*ServerCipher
 	failCnt   []int // failed connection count
+	statistic []ServerStatistics
 }
 
 func parseServerConfig(config *ss.Config) {
@@ -231,6 +233,8 @@ func parseServerConfig(config *ss.Config) {
 		}
 	}
 	servers.failCnt = make([]int, len(servers.srvCipher))
+	servers.statistic = make([]ServerStatistics, len(servers.srvCipher))
+	go showStatistics()
 	for _, se := range servers.srvCipher {
 		log.Println("available remote server", se.server)
 	}
@@ -257,7 +261,7 @@ func connectToServer(serverId int, rawaddr []byte, addr string) (remote *ss.Conn
 // connection failure, try the next server. A failed server will be tried with
 // some probability according to its fail count, so we can discover recovered
 // servers.
-func createServerConn(rawaddr []byte, addr string) (remote *ss.Conn, err error) {
+func createServerConn(rawaddr []byte, addr string) (remote *ss.Conn, id int, err error) {
 	const baseFailCnt = 20
 	n := len(servers.srvCipher)
 	skipped := make([]int, 0)
@@ -269,6 +273,7 @@ func createServerConn(rawaddr []byte, addr string) (remote *ss.Conn, err error) 
 		}
 		remote, err = connectToServer(i, rawaddr, addr)
 		if err == nil {
+			id = i
 			return
 		}
 	}
@@ -276,10 +281,11 @@ func createServerConn(rawaddr []byte, addr string) (remote *ss.Conn, err error) 
 	for _, i := range skipped {
 		remote, err = connectToServer(i, rawaddr, addr)
 		if err == nil {
+			id = i
 			return
 		}
 	}
-	return nil, err
+	return nil, 0, err
 }
 
 func handleConnection(conn net.Conn) {
@@ -312,7 +318,7 @@ func handleConnection(conn net.Conn) {
 		return
 	}
 
-	remote, err := createServerConn(rawaddr, addr)
+	remote, id, err := createServerConn(rawaddr, addr)
 	if err != nil {
 		if len(servers.srvCipher) > 1 {
 			log.Println("Failed connect to all avaiable shadowsocks server")
@@ -324,9 +330,11 @@ func handleConnection(conn net.Conn) {
 			remote.Close()
 		}
 	}()
+	dcon := &DelegateConnection{conn, time.Now(), 0, 0}
+	go ss.PipeThenClose(dcon, remote)
+	ss.PipeThenClose(remote, dcon)
 
-	go ss.PipeThenClose(conn, remote)
-	ss.PipeThenClose(remote, conn)
+	servers.statistic[id].update(dcon.getBandwidth())
 	closed = true
 	debug.Println("closed connection to", addr)
 }
@@ -427,4 +435,86 @@ func main1() {
 	parseServerConfig(config)
 
 	run(cmdLocal + ":" + strconv.Itoa(config.LocalPort))
+}
+
+type DelegateConnection struct {
+	delegate   net.Conn
+	start      time.Time
+	readbytes  int
+	writebytes int
+}
+
+func (con *DelegateConnection) Read(b []byte) (n int, err error) {
+	n, err = con.delegate.Read(b)
+	con.readbytes += n
+	return
+}
+
+func (con *DelegateConnection) Write(b []byte) (n int, err error) {
+	n, err = con.delegate.Write(b)
+	con.writebytes += n
+	return
+}
+
+func (con *DelegateConnection) Close() error {
+	return con.delegate.Close()
+}
+
+func (con *DelegateConnection) LocalAddr() net.Addr {
+	return con.delegate.LocalAddr()
+}
+
+func (con *DelegateConnection) RemoteAddr() net.Addr {
+	return con.delegate.RemoteAddr()
+}
+
+func (con *DelegateConnection) SetDeadline(t time.Time) error {
+	return con.delegate.SetDeadline(t)
+}
+
+func (con *DelegateConnection) SetReadDeadline(t time.Time) error {
+	return con.delegate.SetReadDeadline(t)
+}
+
+func (con *DelegateConnection) SetWriteDeadline(t time.Time) error {
+	return con.delegate.SetWriteDeadline(t)
+}
+
+func (con *DelegateConnection) getBandwidth() (downlink float64, uplink float64) {
+	elapsed := time.Since(con.start)
+	seconds := float64(elapsed / time.Second)
+	downlink = float64(con.readbytes) / seconds
+	uplink = float64(con.writebytes) / seconds
+	return
+
+}
+
+type ServerStatistics struct {
+	cnt      int
+	downlink float64
+	uplink   float64
+	mux      sync.Mutex
+}
+
+func (ss *ServerStatistics) update(downlink float64, uplink float64) {
+	p := 0.05
+	ss.mux.Lock()
+	defer ss.mux.Unlock()
+	if ss.cnt < int(1/p) {
+		ss.downlink = (float64(ss.cnt)*ss.downlink + downlink) / float64(ss.cnt+1)
+		ss.uplink = (float64(ss.cnt)*ss.uplink + uplink) / float64(ss.cnt+1)
+	} else {
+		ss.downlink = ss.downlink*(1-p) + downlink*p
+		ss.uplink = ss.uplink*(1-p) + uplink*p
+	}
+	ss.cnt++
+}
+
+func showStatistics() {
+	for {
+		time.Sleep(60 * time.Second)
+		for i := 0; i < len(servers.statistic); i++ {
+			log.Printf("%s up:%f,down:%f", servers.srvCipher[i].server, servers.statistic[i].uplink, servers.statistic[i].downlink)
+		}
+	}
 }
